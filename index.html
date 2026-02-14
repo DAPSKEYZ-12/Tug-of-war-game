@@ -455,6 +455,203 @@
                 </div>
             `;
         }
+
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const SoundFX = {
+            play: (freq, type, duration, vol=0.1) => {
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.type = type;
+                osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+                gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + duration);
+                osc.connect(gain); gain.connect(audioCtx.destination);
+                osc.start(); osc.stop(audioCtx.currentTime + duration);
+            },
+            correct: () => SoundFX.play(523.25, 'sine', 0.2),
+            wrong: () => SoundFX.play(110, 'triangle', 0.3, 0.2),
+            win: () => {
+                SoundFX.play(261, 'square', 0.5);
+                setTimeout(() => SoundFX.play(329, 'square', 0.5), 100);
+                setTimeout(() => SoundFX.play(392, 'square', 0.5), 200);
+            }
+        };
+
+        const MAX_ROPE = 100;
+        const PULL_STRENGTH = 8;
+        let gameState = { active: false, time: 60, ropePos: 0, scores: { blue: 0, red: 0 }, currentQ: { blue: null, red: null } };
+        let questionsBank = [];
+
+        async function loadQuestionsFromSheet() {
+            const url = `https://docs.google.com/spreadsheets/d/e/2PACX-1vQ_0xR5UpptDkfba9t5yv0UM2phre9JFU2sYU0JX2YZr442xO7kI5LxhqyxcDgetYj5bkE6kVWPNJ-u/pub?output=csv`;
+            const proxy = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+
+            try {
+                const res = await fetch(proxy);
+                const csv = await res.text();
+                const rows = csv.split('\n').slice(1);
+                questionsBank = rows.map(row => {
+                    const cols = row.split(',');
+                    let rawQ = cols[1];
+                    return { q: rawQ, a: parseFloat(cols[cols.length-1]) };
+                }).filter(q => !isNaN(q.a));
+            } catch (e) {
+                questionsBank = [
+                    {q: "Solve: $x + 13 = 25$", a: 12}, 
+                    {q: "Calculate: $\\sqrt{81}$", a: 9}, 
+                    {q: "Solve: $2x = 40$", a: 20}
+                ];
+            }
+        }
+
+        function createPullEffect(team) {
+            const container = document.getElementById(`panel-${team}`);
+            const el = document.createElement('div');
+            el.className = `pull-indicator ${team === 'blue' ? 'text-blue-500' : 'text-red-500'} text-4xl`;
+            el.innerText = 'PULL!';
+            el.style.left = Math.random() * 80 + 10 + '%';
+            el.style.top = '40%';
+            container.appendChild(el);
+            setTimeout(() => el.remove(), 800);
+        }
+
+        function submitAnswer(team) {
+            if (!gameState.active) return;
+            const inputEl = document.getElementById(`input-${team}`);
+            const val = parseFloat(inputEl.value);
+            const correct = gameState.currentQ[team].a;
+
+            if (val === correct) {
+                SoundFX.correct();
+                gameState.scores[team]++;
+                document.getElementById(`score-${team}`).innerText = gameState.scores[team];
+                gameState.ropePos += (team === 'red' ? PULL_STRENGTH : -PULL_STRENGTH);
+                createPullEffect(team);
+                updateRope();
+                inputEl.value = '';
+                renderQ(team);
+                
+                const card = document.getElementById(`card-${team}`);
+                card.style.transform = 'scale(1.05)';
+                setTimeout(() => card.style.transform = 'scale(1)', 100);
+            } else {
+                SoundFX.wrong();
+                const card = document.getElementById(`card-${team}`);
+                card.classList.add('straining');
+                setTimeout(() => card.classList.remove('straining'), 400);
+            }
+        }
+
+        function updateRope() {
+            const visualPos = 50 + (gameState.ropePos / 2.5);
+            document.documentElement.style.setProperty('--rope-position', `${visualPos}%`);
+            document.getElementById('bar-blue').style.width = `${visualPos}%`;
+            
+            const leaderTag = document.getElementById('leader-tag');
+            if (gameState.ropePos < -10) {
+                leaderTag.innerText = "Blue Leading";
+                leaderTag.className = "text-[10px] font-extrabold text-blue-500 uppercase mb-1 tracking-tighter";
+            } else if (gameState.ropePos > 10) {
+                leaderTag.innerText = "Red Leading";
+                leaderTag.className = "text-[10px] font-extrabold text-red-500 uppercase mb-1 tracking-tighter";
+            } else {
+                leaderTag.innerText = "Deadlocked";
+                leaderTag.className = "text-[10px] font-extrabold text-gray-400 uppercase mb-1 tracking-tighter";
+            }
+
+            if (Math.abs(gameState.ropePos) >= MAX_ROPE) {
+                endGame(gameState.ropePos < 0 ? 'Blue' : 'Red');
+            }
+        }
+
+        function inputKey(team, key) {
+            const input = document.getElementById(`input-${team}`);
+            if (input.value.length < 8) input.value += key;
+        }
+
+        function clearInput(team) {
+            document.getElementById(`input-${team}`).value = '';
+        }
+
+        function renderQ(team) {
+            const qData = questionsBank[Math.floor(Math.random() * questionsBank.length)];
+            gameState.currentQ[team] = qData;
+            const el = document.getElementById(`q-${team}`);
+            el.innerHTML = qData.q;
+            
+            if (window.MathJax) {
+                MathJax.typesetPromise([el]);
+            }
+        }
+
+        async function startGame() {
+            await loadQuestionsFromSheet();
+            document.getElementById('modal-overlay').classList.add('hidden');
+            gameState.active = true;
+            renderQ('blue');
+            renderQ('red');
+            
+            const timerInterval = setInterval(() => {
+                gameState.time--;
+                document.getElementById('timer').innerText = gameState.time;
+                if (gameState.time <= 0) {
+                    let winner = 'Draw';
+                    if (gameState.ropePos < -5) winner = 'Blue';
+                    else if (gameState.ropePos > 5) winner = 'Red';
+                    else if (gameState.scores.blue > gameState.scores.red) winner = 'Blue';
+                    else if (gameState.scores.red > gameState.scores.blue) winner = 'Red';
+                    endGame(winner);
+                }
+                if (!gameState.active) clearInterval(timerInterval);
+            }, 1000);
+        }
+
+        function endGame(winner) {
+            gameState.active = false;
+            SoundFX.win();
+            
+            if (winner !== 'Draw') {
+                confetti({
+                    particleCount: 150,
+                    spread: 70,
+                    origin: { y: 0.6 },
+                    colors: winner === 'Blue' ? ['#2563eb', '#ffffff'] : ['#dc2626', '#ffffff']
+                });
+            }
+
+            document.getElementById('modal-overlay').classList.remove('hidden');
+            document.getElementById('start-content').classList.add('hidden');
+            document.getElementById('end-content').classList.remove('hidden');
+            
+            const winText = document.getElementById('winner-text');
+            const resultDetail = document.getElementById('result-detail');
+            const scoreBoard = document.getElementById('final-scores');
+            const victoryIcon = document.getElementById('victory-icon');
+
+            if (winner === 'Draw') {
+                victoryIcon.innerText = "🤝";
+                winText.innerText = "STALEMATE!";
+                winText.className = "text-4xl font-black mb-1 uppercase text-gray-600";
+                resultDetail.innerText = "Tied on points and power";
+            } else {
+                victoryIcon.innerText = "🏆";
+                winText.innerText = winner + " WINS!";
+                winText.className = `text-4xl font-black mb-1 uppercase ${winner === 'Blue' ? 'text-blue-600' : 'text-red-600'}`;
+                resultDetail.innerText = winner === 'Blue' ? "Team Red was Pulled!" : "Team Blue was Pulled!";
+            }
+
+            scoreBoard.innerHTML = `
+                <div class="text-blue-600">
+                    <span class="block text-xs uppercase opacity-50">Blue Score</span>
+                    ${gameState.scores.blue}
+                </div>
+                <div class="text-gray-300">|</div>
+                <div class="text-red-600">
+                    <span class="block text-xs uppercase opacity-50">Red Score</span>
+                    ${gameState.scores.red}
+                </div>
+            `;
+        }
     </script>
 </body>
 </html>
